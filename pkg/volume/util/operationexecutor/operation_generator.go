@@ -496,9 +496,18 @@ func (og *operationGenerator) GenerateMountVolumeFunc(
 	volumeToMount VolumeToMount,
 	actualStateOfWorld ActualStateOfWorldMounterUpdater,
 	isRemount bool) (volumetypes.GeneratedOperations, error) {
+
+	originalSpec := volumeToMount.VolumeSpec
 	// Get mounter plugin
-	volumePlugin, err :=
-		og.volumePluginMgr.FindPluginBySpec(volumeToMount.VolumeSpec)
+	if isMigrated(og.volumePluginMgr, volumeToMount.VolumeSpec) {
+		csiSpec, err := translateSpec(volumeToMount.VolumeSpec)
+		if err != nil {
+			return volumetypes.GeneratedOperations{}, volumeToMount.GenerateErrorDetailed("MountVolume.TranslateSpec failed", err)
+		}
+		volumeToMount.VolumeSpec = csiSpec
+	}
+
+	volumePlugin, err := og.volumePluginMgr.FindPluginBySpec(volumeToMount.VolumeSpec)
 	if err != nil || volumePlugin == nil {
 		return volumetypes.GeneratedOperations{}, volumeToMount.GenerateErrorDetailed("MountVolume.FindPluginBySpec failed", err)
 	}
@@ -634,7 +643,7 @@ func (og *operationGenerator) GenerateMountVolumeFunc(
 			nil,
 			volumeToMount.OuterVolumeSpecName,
 			volumeToMount.VolumeGidValue,
-			volumeToMount.VolumeSpec)
+			originalSpec)
 		if markVolMountedErr != nil {
 			// On failure, return error. Caller will log and retry.
 			return volumeToMount.GenerateError("MountVolume.MarkVolumeAsMounted failed", markVolMountedErr)
@@ -724,13 +733,19 @@ func (og *operationGenerator) GenerateUnmountVolumeFunc(
 	volumeToUnmount MountedVolume,
 	actualStateOfWorld ActualStateOfWorldMounterUpdater,
 	podsDir string) (volumetypes.GeneratedOperations, error) {
+
+	var pluginName string
+	if isMigrated(og.volumePluginMgr, volumeToUnmount.VolumeSpec) {
+		pluginName = csi.CSIPluginName
+	} else {
+		pluginName = volumeToUnmount.PluginName
+	}
+
 	// Get mountable plugin
-	volumePlugin, err :=
-		og.volumePluginMgr.FindPluginByName(volumeToUnmount.PluginName)
+	volumePlugin, err := og.volumePluginMgr.FindPluginByName(pluginName)
 	if err != nil || volumePlugin == nil {
 		return volumetypes.GeneratedOperations{}, volumeToUnmount.GenerateErrorDetailed("UnmountVolume.FindPluginByName failed", err)
 	}
-
 	volumeUnmounter, newUnmounterErr := volumePlugin.NewUnmounter(
 		volumeToUnmount.InnerVolumeSpecName, volumeToUnmount.PodUID)
 	if newUnmounterErr != nil {
@@ -785,12 +800,26 @@ func (og *operationGenerator) GenerateUnmountDeviceFunc(
 	deviceToDetach AttachedVolume,
 	actualStateOfWorld ActualStateOfWorldMounterUpdater,
 	mounter mount.Interface) (volumetypes.GeneratedOperations, error) {
+
+	var pluginName string
+	if isMigrated(og.volumePluginMgr, deviceToDetach.VolumeSpec) {
+		pluginName = csi.CSIPluginName
+		csiSpec, err := translateSpec(deviceToDetach.VolumeSpec)
+		if err != nil {
+			return volumetypes.GeneratedOperations{}, deviceToDetach.GenerateErrorDetailed("UnmountDevice.TranslateSpec failed", err)
+		}
+		deviceToDetach.VolumeSpec = csiSpec
+	} else {
+		pluginName = deviceToDetach.PluginName
+	}
+
 	// Get DeviceMounter plugin
 	deviceMountableVolumePlugin, err :=
-		og.volumePluginMgr.FindDeviceMountablePluginByName(deviceToDetach.PluginName)
+		og.volumePluginMgr.FindDeviceMountablePluginByName(pluginName)
 	if err != nil || deviceMountableVolumePlugin == nil {
 		return volumetypes.GeneratedOperations{}, deviceToDetach.GenerateErrorDetailed("UnmountDevice.FindDeviceMountablePluginByName failed", err)
 	}
+
 	volumeDeviceUmounter, err := deviceMountableVolumePlugin.NewDeviceUnmounter()
 	if err != nil {
 		return volumetypes.GeneratedOperations{}, deviceToDetach.GenerateErrorDetailed("UnmountDevice.NewDeviceUmounter failed", err)
@@ -1212,6 +1241,7 @@ func (og *operationGenerator) GenerateVerifyControllerAttachedVolumeFunc(
 	volumeToMount VolumeToMount,
 	nodeName types.NodeName,
 	actualStateOfWorld ActualStateOfWorldAttacherUpdater) (volumetypes.GeneratedOperations, error) {
+
 	volumePlugin, err :=
 		og.volumePluginMgr.FindPluginBySpec(volumeToMount.VolumeSpec)
 	if err != nil || volumePlugin == nil {
